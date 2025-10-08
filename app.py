@@ -82,13 +82,13 @@ hr {
 # 🧠 HEADER
 # =====================================
 st.markdown("""
-# 🎧 **Lecture Voice → Notes Generator (Gemini AI)**
-Transform your lecture **audio or video** into:
+# 🎧 *Lecture Voice → Notes Generator (Gemini AI)*
+Transform your lecture *audio or video* into:
 - 📝 Summarized notes  
 - 💡 Flashcards  
 - 🧩 Quizzes  
 
-Powered by **Google Gemini AI** ⚡  
+Powered by *Google Gemini AI* ⚡  
 """)
 
 # =====================================
@@ -111,7 +111,7 @@ if uploaded:
         tmp.write(uploaded.read())
         input_path = tmp.name
 
-    st.success(f"✅ Uploaded: `{uploaded.name}`")
+    st.success(f"✅ Uploaded: {uploaded.name}")
 
     # =====================================
     # 🎬 CONVERT TO AUDIO
@@ -158,11 +158,11 @@ if uploaded:
     # =====================================
     st.divider()
     st.header("🧠 Generate Study Materials")
-    model_name = st.text_input("⚙️ Gemini Model:", value="gemini-2.0-flash")
+    model_name = st.text_input("⚙ Gemini Model:", value="gemini-2.0-flash")
 
     if st.button("✨ Generate Notes, Flashcards & Quizzes"):
         if not transcribed_text.strip():
-            st.warning("⚠️ Please transcribe the lecture before generating content.")
+            st.warning("⚠ Please transcribe the lecture before generating content.")
             st.stop()
 
         with st.spinner("🤖 Generating with Gemini..."):
@@ -173,9 +173,9 @@ You are an academic assistant AI.
 
 Based on the following lecture transcript, create:
 
-1️⃣ **Concise Lecture Notes (with bullet points and emojis if relevant)**  
-2️⃣ **5 Flashcards (Q&A format)**  
-3️⃣ **5 Multiple-Choice Quiz Questions (4 options each, highlight correct answer)**  
+1️⃣ *Concise Lecture Notes (with bullet points and emojis if relevant)*  
+2️⃣ *5 Flashcards (Q&A format)*  
+3️⃣ *5 Multiple-Choice Quiz Questions (4 options each, highlight correct answer)*  
 
 Make it engaging, cleanly formatted, and helpful for students.
 
@@ -202,16 +202,16 @@ Make it engaging, cleanly formatted, and helpful for students.
                     st.info("✅ Available models:")
                     st.write(valid)
                 except Exception as e2:
-                    st.error(f"⚠️ Could not list models: {e2}")
+                    st.error(f"⚠ Could not list models: {e2}")
 
 # =====================================
-# ⚙️ FOOTER
+# ⚙ FOOTER
 # =====================================
 st.divider()
 st.markdown("""
 <center>
-💡 *Developed by Monish Valiveti*  
-Built with ❤️ using **Streamlit + Google Gemini AI**  
-🌐 [GitHub Repository](https://github.com/) | ☁️ [Deployed on Streamlit Cloud](https://share.streamlit.io)
+💡 Developed by Monish Valiveti  
+Built with ❤ using *Streamlit + Google Gemini AI*  
+🌐 [GitHub Repository](https://github.com/) | ☁ [Deployed on Streamlit Cloud](https://share.streamlit.io)
 </center>
 """, unsafe_allow_html=True)
