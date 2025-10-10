@@ -27,6 +27,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Set maximum upload size to 500MB
+st.session_state.setdefault('max_upload_size', 500)
+
 # =====================================
 # 🎨 CUSTOM CSS
 # =====================================
@@ -203,7 +206,18 @@ if uploaded and not st.session_state.transcribed_text:
                 audio_path = input_path
 
             sound = AudioSegment.from_file(audio_path)
+            
+            # Enhance audio quality for better transcription
+            # Normalize audio to improve recognition of low volume
+            sound = sound.normalize()
+            
+            # Reduce noise and enhance speech
+            sound = sound.high_pass_filter(80)  # Remove low frequency noise
+            sound = sound.low_pass_filter(8000)  # Remove high frequency noise
+            
+            # Convert to mono and set frame rate
             sound = sound.set_channels(1).set_frame_rate(16000)
+            
             processed_path = tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name
             sound.export(processed_path, format="wav")
         except Exception as e:
@@ -211,12 +225,36 @@ if uploaded and not st.session_state.transcribed_text:
             st.stop()
 
     recognizer = sr.Recognizer()
+    
+    # Enhanced audio recognition settings for better accuracy
+    recognizer.energy_threshold = 300  # Adjust for low volume audio
+    recognizer.dynamic_energy_threshold = True
+    recognizer.dynamic_energy_adjustment_damping = 0.15
+    recognizer.dynamic_energy_ratio = 1.5
+    recognizer.pause_threshold = 0.8  # Seconds of silence to consider end of phrase
+    recognizer.phrase_threshold = 0.3  # Minimum seconds of speaking audio
+    recognizer.non_speaking_duration = 0.5
+    
     with st.spinner("📝 Transcribing lecture..."):
         try:
             with sr.AudioFile(processed_path) as src:
+                # Adjust for ambient noise to improve recognition
+                recognizer.adjust_for_ambient_noise(src, duration=1)
                 audio_data = recognizer.record(src)
-            st.session_state.transcribed_text = recognizer.recognize_google(audio_data)
+            
+            # Try Google Speech Recognition with language options
+            st.session_state.transcribed_text = recognizer.recognize_google(
+                audio_data,
+                language="en-US",
+                show_all=False
+            )
             st.success("✅ Transcription complete!")
+        except sr.UnknownValueError:
+            st.error("❌ Could not understand audio. Please ensure the audio is clear and audible.")
+            st.session_state.transcribed_text = ""
+        except sr.RequestError as e:
+            st.error(f"❌ Transcription service error: {e}")
+            st.session_state.transcribed_text = ""
         except Exception as e:
             st.error(f"❌ Transcription failed: {e}")
             st.session_state.transcribed_text = ""
@@ -347,18 +385,29 @@ if st.session_state.quiz_data and st.session_state.current_view == "quiz":
         
         for i, q in enumerate(quiz_questions):
             st.markdown(f"### Q{i+1}. {q['question']}")
+            
+            # Add a placeholder option to avoid pre-selection
+            options_with_placeholder = ["-- Select an answer --"] + q["options"]
+            
             selected = st.radio(
                 f"Select answer for Q{i+1}:",
-                options=q["options"],
+                options=options_with_placeholder,
                 key=f"quiz_q{i}",
-                label_visibility="collapsed"
+                label_visibility="collapsed",
+                index=0  # Default to placeholder
             )
             user_answers.append(selected)
             st.markdown("---")
         
-        submit_button = st.form_submit_button("✅ Submit Quiz", use_container_width=True)
+        # Check if all questions are answered (not placeholder)
+        all_answered = all(ans != "-- Select an answer --" for ans in user_answers)
         
-        if submit_button:
+        if not all_answered:
+            st.warning("⚠️ Please answer all questions before submitting!")
+        
+        submit_button = st.form_submit_button("✅ Submit Quiz", use_container_width=True, disabled=not all_answered)
+        
+        if submit_button and all_answered:
             score = 0
             total = len(quiz_questions)
             

@@ -4,3 +4,8 @@ backgroundColor = "#0E1117"
 secondaryBackgroundColor = "#1E1E1E"
 textColor = "#FAFAFA"
 font = "monospace"
+[server]
+maxUploadSize = 500
+
+[browser]
+gatherUsageStats = false
