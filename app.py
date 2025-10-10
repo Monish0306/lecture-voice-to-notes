@@ -6,10 +6,16 @@ import speech_recognition as sr
 from pydub import AudioSegment
 from moviepy.editor import VideoFileClip
 import google.generativeai as genai
-import sounddevice as sd
-from scipy.io.wavfile import write
-import numpy as np
 from datetime import datetime
+
+# Try to import sounddevice (optional for recording feature)
+try:
+    import sounddevice as sd
+    from scipy.io.wavfile import write
+    import numpy as np
+    RECORDING_AVAILABLE = True
+except (ImportError, OSError):
+    RECORDING_AVAILABLE = False
 
 # =====================================
 # 🌟 PAGE CONFIGURATION
@@ -156,20 +162,25 @@ if "current_view" not in st.session_state:
 # =====================================
 # 🎙 RECORD OR UPLOAD
 # =====================================
-st.sidebar.header("🎤 Record Audio")
-record_duration = st.sidebar.slider("Recording Duration (seconds)", 5, 60, 10)
-
 uploaded = None
-if st.sidebar.button("⏺ Start Recording"):
-    st.info("🎙 Recording...")
-    fs = 16000
-    recording = sd.rec(int(record_duration * fs), samplerate=fs, channels=1, dtype='int16')
-    sd.wait()
-    temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-    write(temp_audio.name, fs, recording)
-    st.sidebar.success(f"✅ Recorded {record_duration} seconds of audio!")
-    uploaded = open(temp_audio.name, "rb")
+
+if RECORDING_AVAILABLE:
+    st.sidebar.header("🎤 Record Audio")
+    record_duration = st.sidebar.slider("Recording Duration (seconds)", 5, 60, 10)
+
+    if st.sidebar.button("⏺ Start Recording"):
+        st.info("🎙 Recording...")
+        fs = 16000
+        recording = sd.rec(int(record_duration * fs), samplerate=fs, channels=1, dtype='int16')
+        sd.wait()
+        temp_audio = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        write(temp_audio.name, fs, recording)
+        st.sidebar.success(f"✅ Recorded {record_duration} seconds of audio!")
+        uploaded = open(temp_audio.name, "rb")
 else:
+    st.sidebar.info("🎤 Recording feature not available in cloud deployment")
+
+if not uploaded:
     uploaded = st.file_uploader("📂 Upload Audio or Video",
                                 type=["mp3", "wav", "m4a", "mp4", "mov", "mkv", "avi"])
 
