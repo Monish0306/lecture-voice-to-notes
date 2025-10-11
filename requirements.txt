@@ -1,9 +1,7 @@
 streamlit
-google-generativeai
 SpeechRecognition
 pydub
-moviepy==1.0.3
-ffmpeg-python
-sounddevice
-scipy
-numpy
+moviepy
+google-generativeai
+openai-whisper
+torch
