@@ -328,16 +328,37 @@ if uploaded and not st.session_state.transcribed_text:
     
     status_text.info(f"📝 **Step 3/3:** Transcribing {audio_duration:.0f}s of audio...")
     
-    # Estimate transcription time
+    # Estimate transcription time based on audio duration
     if WHISPER_AVAILABLE:
         estimated_time = audio_duration * 0.3  # Whisper is ~0.3x realtime
-        time_text.text(f"⏱️ Using Whisper AI | Estimated time: {estimated_time:.0f}s | Audio: {audio_duration:.0f}s")
+        estimated_mins = int(estimated_time // 60)
+        estimated_secs = int(estimated_time % 60)
+        if estimated_mins > 0:
+            time_estimate = f"{estimated_mins}min {estimated_secs}s"
+        else:
+            time_estimate = f"{estimated_secs}s"
+        time_text.text(f"⏱️ Using Whisper AI | Estimated: {time_estimate} | Audio: {int(audio_duration//60)}min {int(audio_duration%60)}s")
+        st.info(f"🕐 **Processing Time:** This may take approximately **{time_estimate}** for high accuracy transcription. Please wait...")
     elif ASSEMBLYAI_AVAILABLE:
         estimated_time = audio_duration * 0.5  # AssemblyAI is ~0.5x realtime
-        time_text.text(f"⏱️ Using AssemblyAI | Estimated time: {estimated_time:.0f}s | Audio: {audio_duration:.0f}s")
+        estimated_mins = int(estimated_time // 60)
+        estimated_secs = int(estimated_time % 60)
+        if estimated_mins > 0:
+            time_estimate = f"{estimated_mins}min {estimated_secs}s"
+        else:
+            time_estimate = f"{estimated_secs}s"
+        time_text.text(f"⏱️ Using AssemblyAI | Estimated: {time_estimate} | Audio: {int(audio_duration//60)}min {int(audio_duration%60)}s")
+        st.info(f"🕐 **Processing Time:** Uploading and processing will take approximately **{time_estimate}**. Please wait...")
     else:
         estimated_time = audio_duration * 0.8  # Google SR is ~0.8x realtime
-        time_text.text(f"⏱️ Using Google Speech Recognition | Estimated time: {estimated_time:.0f}s | Audio: {audio_duration:.0f}s")
+        estimated_mins = int(estimated_time // 60)
+        estimated_secs = int(estimated_time % 60)
+        if estimated_mins > 0:
+            time_estimate = f"{estimated_mins}min {estimated_secs}s"
+        else:
+            time_estimate = f"{estimated_secs}s"
+        time_text.text(f"⏱️ Using Google Speech Recognition | Estimated: {time_estimate} | Audio: {int(audio_duration//60)}min {int(audio_duration%60)}s")
+        st.info(f"🕐 **Processing Time:** This will take approximately **{time_estimate}**. Please wait...")
 
     # Use Whisper if available (BEST accuracy - works offline)
     if WHISPER_AVAILABLE:
