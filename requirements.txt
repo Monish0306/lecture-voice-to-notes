@@ -6,3 +6,5 @@ imageio-ffmpeg
 decorator
 proglog
 google-generativeai
+faster-whisper
+ctranslate2

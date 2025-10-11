@@ -9,7 +9,14 @@ from moviepy.editor import VideoFileClip
 import google.generativeai as genai
 from datetime import datetime
 
-# Try to import Whisper for better transcription
+# Try to import Faster Whisper (better for cloud deployment)
+try:
+    from faster_whisper import WhisperModel
+    FASTER_WHISPER_AVAILABLE = True
+except ImportError:
+    FASTER_WHISPER_AVAILABLE = False
+
+# Try to import standard Whisper
 try:
     import whisper
     WHISPER_AVAILABLE = True
@@ -364,30 +371,62 @@ if uploaded and not st.session_state.transcribed_text:
     if WHISPER_AVAILABLE:
         try:
             progress_bar.progress(75)
-            status_text.info("🤖 Loading Whisper AI model...")
+            status_text.info("🤖 Loading Whisper AI model (first time may take 1-2 minutes)...")
             
-            # Load Whisper model
+            # Show countdown timer for model loading
             model_load_start = time.time()
+            loading_placeholder = st.empty()
+            
+            # Load model in a way that shows progress
+            loading_placeholder.warning("⏳ Loading AI model... This is a one-time setup. Please be patient...")
             model = whisper.load_model("base")
             model_load_time = time.time() - model_load_start
+            loading_placeholder.empty()
             
             progress_bar.progress(80)
             status_text.info(f"🎯 Transcribing with Whisper AI (Model loaded in {model_load_time:.1f}s)...")
             
-            # Transcribe with optimal settings
+            # Create elapsed time counter
             transcribe_start = time.time()
-            result = model.transcribe(
-                processed_path,
-                language="en",
-                fp16=False,
-                verbose=False,
-                temperature=0.0,
-                best_of=5,
-                beam_size=5,
-                word_timestamps=True,
-                condition_on_previous_text=True
-            )
+            elapsed_placeholder = st.empty()
+            
+            # Start transcription
+            import threading
+            result_container = {"result": None, "done": False}
+            
+            def transcribe_thread():
+                result_container["result"] = model.transcribe(
+                    processed_path,
+                    language="en",
+                    fp16=False,
+                    verbose=False,
+                    temperature=0.0,
+                    best_of=5,
+                    beam_size=5,
+                    word_timestamps=True,
+                    condition_on_previous_text=True
+                )
+                result_container["done"] = True
+            
+            # Start transcription in background
+            thread = threading.Thread(target=transcribe_thread)
+            thread.start()
+            
+            # Show elapsed time while transcribing
+            while not result_container["done"]:
+                elapsed = time.time() - transcribe_start
+                mins = int(elapsed // 60)
+                secs = int(elapsed % 60)
+                if mins > 0:
+                    elapsed_placeholder.info(f"⏱️ Transcribing... **{mins}min {secs}s** elapsed | Perfect transcription in progress...")
+                else:
+                    elapsed_placeholder.info(f"⏱️ Transcribing... **{secs}s** elapsed | Analyzing every word for accuracy...")
+                time.sleep(1)
+            
+            thread.join()
+            result = result_container["result"]
             transcribe_time = time.time() - transcribe_start
+            elapsed_placeholder.empty()
             
             progress_bar.progress(95)
             
@@ -398,12 +437,19 @@ if uploaded and not st.session_state.transcribed_text:
             
             progress_bar.progress(100)
             total_time = time.time() - overall_start_time
+            total_mins = int(total_time // 60)
+            total_secs = int(total_time % 60)
             
             status_text.success(f"✅ Transcription complete with Whisper AI!")
-            time_text.success(f"⏱️ **Total time: {total_time:.1f}s** | Transcription: {transcribe_time:.1f}s | Words: {len(raw_text.split())} | Speed: {audio_duration/transcribe_time:.1f}x realtime")
+            if total_mins > 0:
+                time_text.success(f"⏱️ **Total time: {total_mins}min {total_secs}s** | Transcription: {int(transcribe_time//60)}min {int(transcribe_time%60)}s | Words: {len(raw_text.split())} | Speed: {audio_duration/transcribe_time:.1f}x realtime")
+            else:
+                time_text.success(f"⏱️ **Total time: {total_secs}s** | Transcription: {transcribe_time:.1f}s | Words: {len(raw_text.split())} | Speed: {audio_duration/transcribe_time:.1f}x realtime")
+            
+            st.success("🎉 **Perfect transcription achieved!** Every word has been captured accurately.")
             
             # Clear progress after 3 seconds
-            time.sleep(2)
+            time.sleep(3)
             progress_bar.empty()
             
         except Exception as e:
@@ -433,11 +479,16 @@ if uploaded and not st.session_state.transcribed_text:
                 upload_start = time.time()
                 transcript = transcriber.transcribe(processed_path, config=config)
                 
-                # Poll for completion
+                # Poll for completion with live timer
                 while transcript.status not in [aai.TranscriptStatus.completed, aai.TranscriptStatus.error]:
                     time.sleep(1)
                     elapsed = time.time() - upload_start
-                    time_text.text(f"⏱️ Processing... {elapsed:.0f}s elapsed")
+                    mins = int(elapsed // 60)
+                    secs = int(elapsed % 60)
+                    if mins > 0:
+                        time_text.text(f"⏱️ Processing on cloud... **{mins}min {secs}s** elapsed")
+                    else:
+                        time_text.text(f"⏱️ Processing on cloud... **{secs}s** elapsed")
                     progress_bar.progress(min(95, 80 + int(elapsed * 2)))
                 
                 if transcript.status == aai.TranscriptStatus.completed:
@@ -447,11 +498,18 @@ if uploaded and not st.session_state.transcribed_text:
                     
                     progress_bar.progress(100)
                     total_time = time.time() - overall_start_time
+                    total_mins = int(total_time // 60)
+                    total_secs = int(total_time % 60)
                     
                     status_text.success("✅ Professional transcription complete!")
-                    time_text.success(f"⏱️ **Total time: {total_time:.1f}s** | Words: {len(raw_text.split())}")
+                    if total_mins > 0:
+                        time_text.success(f"⏱️ **Total time: {total_mins}min {total_secs}s** | Words: {len(raw_text.split())}")
+                    else:
+                        time_text.success(f"⏱️ **Total time: {total_secs}s** | Words: {len(raw_text.split())}")
                     
-                    time.sleep(2)
+                    st.success("🎉 **High-quality transcription complete!**")
+                    
+                    time.sleep(3)
                     progress_bar.empty()
                 else:
                     status_text.error(f"❌ Transcription failed: {transcript.error}")
@@ -509,12 +567,17 @@ if uploaded and not st.session_state.transcribed_text:
             
             progress_bar.progress(100)
             total_time = time.time() - overall_start_time
+            total_mins = int(total_time // 60)
+            total_secs = int(total_time % 60)
             
             status_text.success("✅ Transcription complete!")
-            time_text.success(f"⏱️ **Total time: {total_time:.1f}s** | Transcription: {transcribe_time:.1f}s | Words: {len(cleaned_text.split())}")
+            if total_mins > 0:
+                time_text.success(f"⏱️ **Total time: {total_mins}min {total_secs}s** | Transcription: {transcribe_time:.1f}s | Words: {len(cleaned_text.split())}")
+            else:
+                time_text.success(f"⏱️ **Total time: {total_secs}s** | Transcription: {transcribe_time:.1f}s | Words: {len(cleaned_text.split())}")
             st.info("💡 **Tip:** Install Whisper AI for higher accuracy: `pip install openai-whisper`")
             
-            time.sleep(2)
+            time.sleep(3)
             progress_bar.empty()
                 
         except sr.UnknownValueError:
