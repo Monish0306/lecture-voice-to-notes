@@ -1,6 +1,8 @@
 streamlit
 SpeechRecognition
 pydub
-moviepy
+moviepy==1.0.3
 imageio-ffmpeg
+decorator
+proglog
 google-generativeai
