@@ -215,7 +215,25 @@ else:
 
 if not uploaded:
     uploaded = st.file_uploader("📂 Upload Audio or Video",
-                                type=["mp3", "wav", "m4a", "mp4", "mov", "mkv", "avi"])
+                                type=["mp3", "wav", "m4a", "mp4", "mov", "mkv", "avi"],
+                                key="file_uploader")
+
+# Clear previous transcription when new file is uploaded
+if uploaded:
+    current_file_name = uploaded.name
+    if "last_uploaded_file" not in st.session_state:
+        st.session_state.last_uploaded_file = ""
+    
+    # If new file is different from last one, clear everything
+    if st.session_state.last_uploaded_file != current_file_name:
+        st.session_state.transcribed_text = ""
+        st.session_state.quiz_data = None
+        st.session_state.summarized_notes = ""
+        st.session_state.flashcards = []
+        st.session_state.current_view = "home"
+        st.session_state.quiz_submitted = False
+        st.session_state.quiz_results = None
+        st.session_state.last_uploaded_file = current_file_name
 
 # =====================================
 # 🤖 LOAD WHISPER MODEL
