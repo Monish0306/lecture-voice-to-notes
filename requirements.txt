@@ -1,10 +1,13 @@
 streamlit
-SpeechRecognition
+numpy
+soundfile
 pydub
 moviepy==1.0.3
 imageio-ffmpeg
 decorator
 proglog
-google-generativeai
 faster-whisper
+librosa
+requests
 ctranslate2
+scipy

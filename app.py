@@ -4,44 +4,26 @@ import tempfile
 import json
 import re
 import time
+import numpy as np
+import soundfile as sf
+import librosa
+from datetime import datetime
 from pydub import AudioSegment
 from moviepy.editor import VideoFileClip
-import google.generativeai as genai
-from datetime import datetime
+import requests
 
-# Try to import Faster Whisper (better for cloud deployment)
+# Try to import Faster Whisper (BEST for production)
 try:
     from faster_whisper import WhisperModel
     FASTER_WHISPER_AVAILABLE = True
 except ImportError:
     FASTER_WHISPER_AVAILABLE = False
-
-# Try to import standard Whisper
-try:
-    import whisper
-    WHISPER_AVAILABLE = True
-except ImportError:
-    WHISPER_AVAILABLE = False
-
-# Try AssemblyAI as alternative
-try:
-    import assemblyai as aai
-    ASSEMBLYAI_AVAILABLE = True
-except ImportError:
-    ASSEMBLYAI_AVAILABLE = False
-
-# Always import speech_recognition as fallback
-try:
-    import speech_recognition as sr
-    SR_AVAILABLE = True
-except ImportError:
-    SR_AVAILABLE = False
+    st.error("Faster-Whisper not installed. Run: pip install faster-whisper")
 
 # Try to import sounddevice (optional for recording feature)
 try:
     import sounddevice as sd
     from scipy.io.wavfile import write
-    import numpy as np
     RECORDING_AVAILABLE = True
 except (ImportError, OSError):
     RECORDING_AVAILABLE = False
@@ -107,10 +89,7 @@ if "username" not in st.session_state:
     st.session_state.username = ""
 if "user_data" not in st.session_state:
     st.session_state.user_data = {}
-if "show_signup" not in st.session_state:
-    st.session_state.show_signup = False
 
-# Simple login (you can enhance this with database)
 if not st.session_state.logged_in:
     st.markdown("# 🔐 Welcome to Lecture Notes AI")
     
@@ -125,7 +104,6 @@ if not st.session_state.logged_in:
             
             if st.button("🚀 Login", use_container_width=True):
                 if login_username and login_password:
-                    # Check if user exists (simple check - in production use proper authentication)
                     if login_username in st.session_state.user_data:
                         st.session_state.logged_in = True
                         st.session_state.username = login_username
@@ -141,7 +119,6 @@ if not st.session_state.logged_in:
             signup_username = st.text_input("👤 Choose Username", placeholder="Enter username", key="signup_user")
             signup_password = st.text_input("🔒 Choose Password", type="password", placeholder="Enter password", key="signup_pass")
             
-            # Real-time password validation
             if signup_password:
                 is_valid, message = validate_password(signup_password)
                 if is_valid:
@@ -177,7 +154,7 @@ if not st.session_state.logged_in:
 col_header1, col_header2 = st.columns([4, 1])
 with col_header1:
     st.markdown("""
-    # 🎧 Lecture → Notes Generator (Gemini AI)
+    # 🎧 Lecture → Notes Generator (AI Powered)
     Transform lecture audio/video into study materials
     """)
 with col_header2:
@@ -195,7 +172,8 @@ if not API_KEY:
     st.error("❌ Missing Gemini API Key. Set GEMINI_API_KEY in secrets or environment.")
     st.stop()
 
-genai.configure(api_key=API_KEY)
+GEMINI_MODEL = "gemini-2.0-flash-exp"
+API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={API_KEY}"
 
 # Initialize session state
 if "quiz_data" not in st.session_state:
@@ -208,6 +186,10 @@ if "quiz_submitted" not in st.session_state:
     st.session_state.quiz_submitted = False
 if "quiz_results" not in st.session_state:
     st.session_state.quiz_results = None
+if "summarized_notes" not in st.session_state:
+    st.session_state.summarized_notes = ""
+if "flashcards" not in st.session_state:
+    st.session_state.flashcards = []
 
 # =====================================
 # 🎙 RECORD OR UPLOAD
@@ -235,30 +217,84 @@ if not uploaded:
                                 type=["mp3", "wav", "m4a", "mp4", "mov", "mkv", "avi"])
 
 # =====================================
-# 🗣 TRANSCRIPTION WITH WHISPER (BEST ACCURACY)
+# 🤖 LOAD WHISPER MODEL
 # =====================================
-def clean_transcription(text):
-    """Clean transcription but keep all meaningful content"""
-    # Remove excessive repetitions
-    words = text.split()
-    cleaned_words = []
-    prev_word = ""
-    repeat_count = 0
+@st.cache_resource
+def load_whisper_model():
+    """Load Faster Whisper model"""
+    if not FASTER_WHISPER_AVAILABLE:
+        return None
+    try:
+        model = WhisperModel("base", device="cpu", compute_type="int8")
+        return model
+    except Exception as e:
+        st.error(f"Failed to load model: {e}")
+        return None
+
+# =====================================
+# 🎤 AUDIO ENHANCEMENT
+# =====================================
+def enhance_quiet_audio(audio_data, sample_rate):
+    """Enhance very quiet audio without distortion"""
+    max_amplitude = np.max(np.abs(audio_data))
     
-    for word in words:
-        if word.lower() == prev_word.lower():
-            repeat_count += 1
-            if repeat_count < 2:  # Allow one repetition
-                cleaned_words.append(word)
-        else:
-            cleaned_words.append(word)
-            repeat_count = 0
-        prev_word = word
+    if max_amplitude < 0.1:  # Very quiet audio
+        audio_data = audio_data / max_amplitude * 0.7
+        audio_data = librosa.effects.preemphasis(audio_data)
     
-    return ' '.join(cleaned_words).strip()
+    return audio_data
+
+# =====================================
+# 🗣 TRANSCRIPTION
+# =====================================
+def transcribe_audio_bytes(model, audio_bytes: bytes):
+    """Transcribe audio with enhanced accuracy"""
+    try:
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmpfile:
+            tmpfile_path = tmpfile.name
+            
+            # Read audio
+            audio_data, current_sr = sf.read(io.BytesIO(audio_bytes), dtype='float32')
+            
+            # Resample if needed
+            if current_sr != 16000:
+                if audio_data.ndim > 1:
+                    audio_data = np.mean(audio_data, axis=1)
+                audio_data = librosa.resample(audio_data, orig_sr=current_sr, target_sr=16000)
+            
+            # Ensure mono
+            if audio_data.ndim > 1:
+                audio_data = np.mean(audio_data, axis=1)
+            
+            # Enhance quiet audio
+            audio_data = enhance_quiet_audio(audio_data, 16000)
+            
+            # Write processed audio
+            sf.write(tmpfile_path, audio_data, 16000)
+        
+        # Transcribe
+        segments, info = model.transcribe(
+            tmpfile_path,
+            beam_size=5,
+            language="en",
+            vad_filter=True,
+            word_timestamps=True
+        )
+        
+        full_transcript = " ".join(segment.text for segment in segments)
+        
+        # Cleanup
+        if os.path.exists(tmpfile_path):
+            os.remove(tmpfile_path)
+        
+        return full_transcript.strip(), info.language
+        
+    except Exception as e:
+        st.error(f"Transcription error: {e}")
+        return None, None
 
 if uploaded and not st.session_state.transcribed_text:
-    # Start overall timer
     overall_start_time = time.time()
     
     suffix = os.path.splitext(uploaded.name)[1]
@@ -266,19 +302,14 @@ if uploaded and not st.session_state.transcribed_text:
         tmp.write(uploaded.read())
         input_path = tmp.name
     
-    # Get file size for progress estimation
     file_size_mb = os.path.getsize(input_path) / (1024 * 1024)
     
-    # Audio conversion phase
-    conversion_start = time.time()
-    
-    # Create a progress bar and status area
     progress_bar = st.progress(0)
     status_text = st.empty()
     time_text = st.empty()
     
     status_text.info("🎧 **Step 1/3:** Extracting and converting audio...")
-    time_text.text(f"📊 File size: {file_size_mb:.2f} MB | Estimated time: {file_size_mb * 2:.0f}s")
+    time_text.text(f"📊 File size: {file_size_mb:.2f} MB")
     
     try:
         if suffix.lower() in (".mp4", ".mov", ".mkv", ".avi"):
@@ -293,26 +324,19 @@ if uploaded and not st.session_state.transcribed_text:
 
         sound = AudioSegment.from_file(audio_path)
         
-        status_text.info("🎵 **Step 2/3:** Enhancing audio quality for better accuracy...")
+        status_text.info("🎵 **Step 2/3:** Enhancing audio quality...")
         
-        # ENHANCED: Professional-grade audio enhancement
-        # Normalize audio volume
-        sound = sound.normalize()
+        sound = sound.normalize(headroom=0.1)
         progress_bar.progress(35)
         
-        # Apply compression to make quiet parts louder
-        sound = sound.compress_dynamic_range(threshold=-20.0, ratio=4.0, attack=5.0, release=50.0)
+        sound = sound.compress_dynamic_range(threshold=-25.0, ratio=6.0, attack=3.0, release=40.0)
         progress_bar.progress(45)
         
-        # Remove noise while preserving speech
-        sound = sound.high_pass_filter(80)   # Remove very low frequency noise
-        sound = sound.low_pass_filter(8000)  # Remove very high frequency noise
+        sound = sound.high_pass_filter(80)
+        sound = sound.low_pass_filter(8000)
         progress_bar.progress(55)
         
-        # Boost overall volume
-        sound = sound + 12  # Increase by 12dB
-        
-        # Convert to optimal format for transcription
+        sound = sound + 12
         sound = sound.set_channels(1).set_frame_rate(16000)
         progress_bar.progress(65)
         
@@ -320,7 +344,7 @@ if uploaded and not st.session_state.transcribed_text:
         sound.export(processed_path, format="wav")
         progress_bar.progress(70)
         
-        conversion_time = time.time() - conversion_start
+        conversion_time = time.time() - overall_start_time
         time_text.success(f"✅ Audio processing completed in {conversion_time:.1f}s")
         
     except Exception as e:
@@ -329,277 +353,53 @@ if uploaded and not st.session_state.transcribed_text:
         time_text.empty()
         st.stop()
 
-    # Transcription phase
-    transcription_start = time.time()
-    audio_duration = len(sound) / 1000.0  # Duration in seconds
+    # Transcription
+    audio_duration = len(sound) / 1000.0
     
     status_text.info(f"📝 **Step 3/3:** Transcribing {audio_duration:.0f}s of audio...")
     
-    # Estimate transcription time based on audio duration
-    if WHISPER_AVAILABLE:
-        estimated_time = audio_duration * 0.3  # Whisper is ~0.3x realtime
-        estimated_mins = int(estimated_time // 60)
-        estimated_secs = int(estimated_time % 60)
-        if estimated_mins > 0:
-            time_estimate = f"{estimated_mins}min {estimated_secs}s"
-        else:
-            time_estimate = f"{estimated_secs}s"
-        time_text.text(f"⏱️ Using Whisper AI | Estimated: {time_estimate} | Audio: {int(audio_duration//60)}min {int(audio_duration%60)}s")
-        st.info(f"🕐 **Processing Time:** This may take approximately **{time_estimate}** for high accuracy transcription. Please wait...")
-    elif ASSEMBLYAI_AVAILABLE:
-        estimated_time = audio_duration * 0.5  # AssemblyAI is ~0.5x realtime
-        estimated_mins = int(estimated_time // 60)
-        estimated_secs = int(estimated_time % 60)
-        if estimated_mins > 0:
-            time_estimate = f"{estimated_mins}min {estimated_secs}s"
-        else:
-            time_estimate = f"{estimated_secs}s"
-        time_text.text(f"⏱️ Using AssemblyAI | Estimated: {time_estimate} | Audio: {int(audio_duration//60)}min {int(audio_duration%60)}s")
-        st.info(f"🕐 **Processing Time:** Uploading and processing will take approximately **{time_estimate}**. Please wait...")
-    else:
-        estimated_time = audio_duration * 0.8  # Google SR is ~0.8x realtime
-        estimated_mins = int(estimated_time // 60)
-        estimated_secs = int(estimated_time % 60)
-        if estimated_mins > 0:
-            time_estimate = f"{estimated_mins}min {estimated_secs}s"
-        else:
-            time_estimate = f"{estimated_secs}s"
-        time_text.text(f"⏱️ Using Google Speech Recognition | Estimated: {time_estimate} | Audio: {int(audio_duration//60)}min {int(audio_duration%60)}s")
-        st.info(f"🕐 **Processing Time:** This will take approximately **{time_estimate}**. Please wait...")
-
-    # Use Whisper if available (BEST accuracy - works offline)
-    if WHISPER_AVAILABLE:
+    model = load_whisper_model()
+    
+    if model:
         try:
             progress_bar.progress(75)
-            status_text.info("🤖 Loading Whisper AI model (first time may take 1-2 minutes)...")
+            status_text.info("🤖 Loading Faster Whisper AI...")
             
-            # Show countdown timer for model loading
-            model_load_start = time.time()
-            loading_placeholder = st.empty()
-            
-            # Load model in a way that shows progress
-            loading_placeholder.warning("⏳ Loading AI model... This is a one-time setup. Please be patient...")
-            model = whisper.load_model("base")
-            model_load_time = time.time() - model_load_start
-            loading_placeholder.empty()
+            with open(processed_path, "rb") as f:
+                audio_bytes = f.read()
             
             progress_bar.progress(80)
-            status_text.info(f"🎯 Transcribing with Whisper AI (Model loaded in {model_load_time:.1f}s)...")
-            
-            # Create elapsed time counter
-            transcribe_start = time.time()
-            elapsed_placeholder = st.empty()
-            
-            # Start transcription
-            import threading
-            result_container = {"result": None, "done": False}
-            
-            def transcribe_thread():
-                result_container["result"] = model.transcribe(
-                    processed_path,
-                    language="en",
-                    fp16=False,
-                    verbose=False,
-                    temperature=0.0,
-                    best_of=5,
-                    beam_size=5,
-                    word_timestamps=True,
-                    condition_on_previous_text=True
-                )
-                result_container["done"] = True
-            
-            # Start transcription in background
-            thread = threading.Thread(target=transcribe_thread)
-            thread.start()
-            
-            # Show elapsed time while transcribing
-            while not result_container["done"]:
-                elapsed = time.time() - transcribe_start
-                mins = int(elapsed // 60)
-                secs = int(elapsed % 60)
-                if mins > 0:
-                    elapsed_placeholder.info(f"⏱️ Transcribing... **{mins}min {secs}s** elapsed | Perfect transcription in progress...")
-                else:
-                    elapsed_placeholder.info(f"⏱️ Transcribing... **{secs}s** elapsed | Analyzing every word for accuracy...")
-                time.sleep(1)
-            
-            thread.join()
-            result = result_container["result"]
-            transcribe_time = time.time() - transcribe_start
-            elapsed_placeholder.empty()
-            
-            progress_bar.progress(95)
-            
-            raw_text = result["text"]
-            cleaned_text = clean_transcription(raw_text)
-            
-            st.session_state.transcribed_text = cleaned_text if cleaned_text else raw_text
-            
-            progress_bar.progress(100)
-            total_time = time.time() - overall_start_time
-            total_mins = int(total_time // 60)
-            total_secs = int(total_time % 60)
-            
-            status_text.success(f"✅ Transcription complete with Whisper AI!")
-            if total_mins > 0:
-                time_text.success(f"⏱️ **Total time: {total_mins}min {total_secs}s** | Transcription: {int(transcribe_time//60)}min {int(transcribe_time%60)}s | Words: {len(raw_text.split())} | Speed: {audio_duration/transcribe_time:.1f}x realtime")
-            else:
-                time_text.success(f"⏱️ **Total time: {total_secs}s** | Transcription: {transcribe_time:.1f}s | Words: {len(raw_text.split())} | Speed: {audio_duration/transcribe_time:.1f}x realtime")
-            
-            st.success("🎉 **Perfect transcription achieved!** Every word has been captured accurately.")
-            
-            # Clear progress after 3 seconds
-            time.sleep(3)
-            progress_bar.empty()
-            
-        except Exception as e:
-            status_text.error(f"❌ Whisper failed: {e}")
-            time_text.info("Trying alternative method...")
-            progress_bar.progress(70)
-    
-    # Try AssemblyAI if Whisper not available (Cloud-based, very accurate)
-    elif ASSEMBLYAI_AVAILABLE:
-        ASSEMBLYAI_KEY = st.secrets.get("ASSEMBLYAI_API_KEY", os.getenv("ASSEMBLYAI_API_KEY", ""))
-        if ASSEMBLYAI_KEY:
-            try:
-                progress_bar.progress(75)
-                aai.settings.api_key = ASSEMBLYAI_KEY
-                transcriber = aai.Transcriber()
-                
-                config = aai.TranscriptionConfig(
-                    speech_model=aai.SpeechModel.best,
-                    language_detection=True,
-                    punctuate=True,
-                    format_text=True
-                )
-                
-                progress_bar.progress(80)
-                status_text.info("☁️ Uploading to AssemblyAI servers...")
-                
-                upload_start = time.time()
-                transcript = transcriber.transcribe(processed_path, config=config)
-                
-                # Poll for completion with live timer
-                while transcript.status not in [aai.TranscriptStatus.completed, aai.TranscriptStatus.error]:
-                    time.sleep(1)
-                    elapsed = time.time() - upload_start
-                    mins = int(elapsed // 60)
-                    secs = int(elapsed % 60)
-                    if mins > 0:
-                        time_text.text(f"⏱️ Processing on cloud... **{mins}min {secs}s** elapsed")
-                    else:
-                        time_text.text(f"⏱️ Processing on cloud... **{secs}s** elapsed")
-                    progress_bar.progress(min(95, 80 + int(elapsed * 2)))
-                
-                if transcript.status == aai.TranscriptStatus.completed:
-                    raw_text = transcript.text
-                    cleaned_text = clean_transcription(raw_text)
-                    st.session_state.transcribed_text = cleaned_text if cleaned_text else raw_text
-                    
-                    progress_bar.progress(100)
-                    total_time = time.time() - overall_start_time
-                    total_mins = int(total_time // 60)
-                    total_secs = int(total_time % 60)
-                    
-                    status_text.success("✅ Professional transcription complete!")
-                    if total_mins > 0:
-                        time_text.success(f"⏱️ **Total time: {total_mins}min {total_secs}s** | Words: {len(raw_text.split())}")
-                    else:
-                        time_text.success(f"⏱️ **Total time: {total_secs}s** | Words: {len(raw_text.split())}")
-                    
-                    st.success("🎉 **High-quality transcription complete!**")
-                    
-                    time.sleep(3)
-                    progress_bar.empty()
-                else:
-                    status_text.error(f"❌ Transcription failed: {transcript.error}")
-                    
-            except Exception as e:
-                status_text.error(f"❌ AssemblyAI failed: {e}")
-        else:
-            status_text.warning("⚠️ AssemblyAI API key not found. Using fallback method.")
-    
-    # Fallback to speech_recognition if nothing else available
-    if not st.session_state.transcribed_text and SR_AVAILABLE:
-        recognizer = sr.Recognizer()
-        
-        # ENHANCED: Optimized recognition settings
-        recognizer.energy_threshold = 50
-        recognizer.dynamic_energy_threshold = True
-        recognizer.dynamic_energy_adjustment_damping = 0.05
-        recognizer.dynamic_energy_ratio = 1.1
-        recognizer.pause_threshold = 1.2
-        recognizer.phrase_threshold = 0.05
-        recognizer.non_speaking_duration = 0.5
-        
-        try:
-            progress_bar.progress(75)
-            status_text.info("🎤 Analyzing audio...")
-            
-            with sr.AudioFile(processed_path) as src:
-                # Adjust for ambient noise
-                recognizer.adjust_for_ambient_noise(src, duration=2.0)
-                progress_bar.progress(85)
-                
-                status_text.info("📡 Transcribing with Google Speech Recognition...")
-                audio_data = recognizer.record(src)
-            
-            progress_bar.progress(90)
             transcribe_start = time.time()
             
-            # Use Google Speech Recognition
-            raw_text = recognizer.recognize_google(
-                audio_data,
-                language="en-US",
-                show_all=False
-            )
+            transcript, language = transcribe_audio_bytes(model, audio_bytes)
             
-            transcribe_time = time.time() - transcribe_start
-            progress_bar.progress(95)
-            
-            # Minimal cleaning - keep everything
-            cleaned_text = clean_transcription(raw_text)
-            
-            if len(cleaned_text.strip()) > 0:
-                st.session_state.transcribed_text = cleaned_text
-            else:
-                st.session_state.transcribed_text = raw_text
-            
-            progress_bar.progress(100)
-            total_time = time.time() - overall_start_time
-            total_mins = int(total_time // 60)
-            total_secs = int(total_time % 60)
-            
-            status_text.success("✅ Transcription complete!")
-            if total_mins > 0:
-                time_text.success(f"⏱️ **Total time: {total_mins}min {total_secs}s** | Transcription: {transcribe_time:.1f}s | Words: {len(cleaned_text.split())}")
-            else:
-                time_text.success(f"⏱️ **Total time: {total_secs}s** | Transcription: {transcribe_time:.1f}s | Words: {len(cleaned_text.split())}")
-            st.info("💡 **Tip:** Install Whisper AI for higher accuracy: `pip install openai-whisper`")
-            
-            time.sleep(3)
-            progress_bar.empty()
+            if transcript:
+                transcribe_time = time.time() - transcribe_start
+                progress_bar.progress(100)
                 
-        except sr.UnknownValueError:
-            progress_bar.empty()
-            status_text.error("❌ Could not understand audio. Please ensure:\n- Audio is clear and audible\n- Minimal background noise\n- Speaker is close to microphone")
-            time_text.info("💡 **Tip:** For best results, install Whisper AI: `pip install openai-whisper torch`")
-            st.session_state.transcribed_text = ""
-        except sr.RequestError as e:
-            progress_bar.empty()
-            status_text.error(f"❌ Transcription service error: {e}")
-            time_text.empty()
-            st.session_state.transcribed_text = ""
+                st.session_state.transcribed_text = transcript
+                
+                total_time = time.time() - overall_start_time
+                total_mins = int(total_time // 60)
+                total_secs = int(total_time % 60)
+                
+                status_text.success(f"✅ Transcription complete!")
+                if total_mins > 0:
+                    time_text.success(f"⏱️ **Total: {total_mins}min {total_secs}s** | Words: {len(transcript.split())} | Language: {language}")
+                else:
+                    time_text.success(f"⏱️ **Total: {total_secs}s** | Words: {len(transcript.split())} | Language: {language}")
+                
+                st.success("🎉 **Perfect transcription achieved!**")
+                
+                time.sleep(2)
+                progress_bar.empty()
+                
         except Exception as e:
-            progress_bar.empty()
             status_text.error(f"❌ Transcription failed: {e}")
             time_text.empty()
-            st.session_state.transcribed_text = ""
-    
-    elif not st.session_state.transcribed_text:
-        progress_bar.empty()
-        status_text.error("❌ No transcription service available. Please install required packages.")
-        time_text.info("**Run:** `pip install SpeechRecognition` or `pip install openai-whisper`")
+            progress_bar.empty()
+    else:
+        st.error("❌ Whisper model not available")
 
 # =====================================
 # 📜 DISPLAY TRANSCRIPT
@@ -628,48 +428,68 @@ if st.session_state.transcribed_text.strip():
 # =====================================
 # 🤖 GENERATE NOTES, FLASHCARDS, QUIZ
 # =====================================
+def generate_study_materials(transcript):
+    """Generate notes, flashcards, and quiz using Gemini"""
+    try:
+        prompt = f"""Based on this lecture transcript, create a comprehensive study package in JSON format:
+
+{{
+  "notes": "Detailed summary with key concepts (400-500 words, use markdown formatting)",
+  "flashcards": [
+    {{"q": "Question about key concept", "a": "Clear, concise answer"}},
+    // Generate 8-10 flashcards covering main topics
+  ],
+  "quiz": [
+    {{
+      "question": "Question text",
+      "options": ["Option A", "Option B", "Option C", "Option D"],
+      "answer": "Correct option text"
+    }}
+    // Generate exactly 5 questions
+  ]
+}}
+
+Transcript: {transcript}"""
+
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}]
+        }
+        
+        response = requests.post(API_URL, headers={'Content-Type': 'application/json'}, json=payload)
+        
+        if response.status_code == 200:
+            result = response.json()
+            text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '').strip()
+            
+            # Clean JSON
+            text = text.replace('```json', '').replace('```', '').strip()
+            data = json.loads(text)
+            return data
+        else:
+            st.error(f"API Error: {response.status_code}")
+            return None
+            
+    except Exception as e:
+        st.error(f"Generation error: {e}")
+        return None
+
 if st.session_state.transcribed_text:
     st.divider()
     st.header("🧠 Generate Study Materials")
-    model_name = "gemini-2.0-flash"
 
     if st.button("✨ Generate Notes, Flashcards & Quiz"):
-        with st.spinner("🤖 Generating using Gemini..."):
-            try:
-                model = genai.GenerativeModel(model_name)
-                prompt = f"""
-                You are an academic assistant AI. Based on the lecture transcript below,
-                create a JSON with these exact keys:
-                {{
-                  "notes": "Concise and clear summary in markdown (max 400 words)",
-                  "flashcards": [
-                    {{"q": "Question1", "a": "Answer1"}},
-                    {{"q": "Question2", "a": "Answer2"}}
-                  ],
-                  "quiz": [
-                    {{"question": "Question text", "options": ["Option A", "Option B", "Option C", "Option D"], "answer": "Option A"}}
-                  ]
-                }}
-                Generate **exactly 5 quiz questions**, each with 4 distinct options (A–D).
-                Make the notes comprehensive and detailed, extracting all key concepts from the lecture.
-                Transcript: {st.session_state.transcribed_text}
-                """
-                response = model.generate_content(prompt)
-                raw_text = response.text.strip()
-                if raw_text.startswith("```"):
-                    raw_text = raw_text.split("```")[1]
-                raw_text = raw_text.replace("json", "").strip()
-                data = json.loads(raw_text)
-
+        with st.spinner("🤖 Generating with Gemini AI..."):
+            data = generate_study_materials(st.session_state.transcribed_text)
+            
+            if data:
                 st.session_state.quiz_data = data
+                st.session_state.summarized_notes = data.get("notes", "")
+                st.session_state.flashcards = data.get("flashcards", [])
                 st.session_state.current_view = "notes"
                 st.session_state.quiz_submitted = False
                 st.session_state.quiz_results = None
-                st.success("✅ Study materials generated successfully!")
+                st.success("✅ Study materials generated!")
                 st.rerun()
-
-            except Exception as e:
-                st.error(f"❌ Gemini API Error: {e}")
 
 # =====================================
 # 🎯 NAVIGATION BUTTONS
@@ -705,14 +525,21 @@ if st.session_state.quiz_data:
 # =====================================
 if st.session_state.quiz_data and st.session_state.current_view == "notes":
     st.markdown("## 📝 Study Notes")
-    st.markdown(st.session_state.quiz_data.get("notes", ""))
+    st.markdown(st.session_state.summarized_notes)
+    
+    st.download_button(
+        "📥 Download Notes",
+        st.session_state.summarized_notes,
+        file_name="lecture_notes.md",
+        mime="text/markdown"
+    )
 
 # =====================================
 # 💡 FLASHCARDS VIEW
 # =====================================
 if st.session_state.quiz_data and st.session_state.current_view == "flashcards":
     st.markdown("## 💡 Flashcards")
-    for i, fc in enumerate(st.session_state.quiz_data.get("flashcards", []), 1):
+    for i, fc in enumerate(st.session_state.flashcards, 1):
         with st.expander(f"🃏 Flashcard {i}: {fc['q']}", expanded=False):
             st.markdown(f"### Question:")
             st.info(fc['q'])
@@ -720,36 +547,30 @@ if st.session_state.quiz_data and st.session_state.current_view == "flashcards":
             st.success(fc['a'])
 
 # =====================================
-# 🧩 QUIZ VIEW - FIXED VERSION
+# 🧩 QUIZ VIEW
 # =====================================
 if st.session_state.quiz_data and st.session_state.current_view == "quiz":
     st.markdown("## 🧩 Interactive Quiz")
     
     quiz_questions = st.session_state.quiz_data["quiz"][:5]
     
-    # Show quiz form only if not submitted
     if not st.session_state.quiz_submitted:
-        # Use a unique key for the form
         with st.form(key="quiz_submission_form", clear_on_submit=False):
             user_answers = []
             
             for i, q in enumerate(quiz_questions):
                 st.markdown(f"### Q{i+1}. {q['question']}")
                 
-                # Use index=-1 to show no selection initially (not supported by radio)
-                # So we use index=None by not setting it, but radio needs an index
-                # Solution: Use index=None is not valid, so we'll use selectbox instead
                 selected = st.radio(
                     f"Select your answer:",
                     options=q["options"],
                     key=f"q_{i}",
-                    index=None,  # No pre-selection in newer Streamlit versions
+                    index=None,
                     label_visibility="collapsed"
                 )
                 user_answers.append(selected)
                 st.markdown("---")
             
-            # Check if all answered
             all_answered = all(ans is not None for ans in user_answers)
             
             if not all_answered:
@@ -759,12 +580,10 @@ if st.session_state.quiz_data and st.session_state.current_view == "quiz":
             
             if submitted:
                 if all_answered:
-                    # Calculate score
                     score = sum(1 for i, q in enumerate(quiz_questions) if user_answers[i] == q["answer"])
                     total = len(quiz_questions)
                     percent = (score / total) * 100
                     
-                    # Store results in session state
                     st.session_state.quiz_results = {
                         "score": score,
                         "total": total,
@@ -774,12 +593,11 @@ if st.session_state.quiz_data and st.session_state.current_view == "quiz":
                     }
                     st.session_state.quiz_submitted = True
                     
-                    # Save to history
                     user_history = st.session_state.user_data[st.session_state.username]["history"]
                     user_history.append({
                         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "notes": st.session_state.quiz_data.get("notes", ""),
-                        "flashcards": st.session_state.quiz_data.get("flashcards", []),
+                        "notes": st.session_state.summarized_notes,
+                        "flashcards": st.session_state.flashcards,
                         "quiz_score": f"{score}/{total}",
                         "percentage": percent
                     })
@@ -791,14 +609,12 @@ if st.session_state.quiz_data and st.session_state.current_view == "quiz":
                 else:
                     st.error("❌ Please answer all questions!")
     
-    # Show results if submitted
     if st.session_state.quiz_submitted and st.session_state.quiz_results:
         results = st.session_state.quiz_results
         
         st.divider()
         st.subheader("📊 Quiz Results")
         
-        # Show detailed results
         for i, q in enumerate(results["questions"]):
             user_ans = results["user_answers"][i]
             correct_ans = q["answer"]
@@ -813,7 +629,6 @@ if st.session_state.quiz_data and st.session_state.current_view == "quiz":
                 st.error(f"❌ Wrong! Correct answer: **{correct_ans}**")
             st.markdown("---")
         
-        # Final score
         st.markdown("### 🏆 Final Score")
         st.success(f"**{results['score']}/{results['total']} ({results['percent']:.1f}%)**")
 
@@ -825,7 +640,6 @@ if st.session_state.quiz_data and st.session_state.current_view == "quiz":
             st.balloons()
             st.success("🎉 Excellent! Perfect understanding!")
         
-        # Retake button
         if st.button("🔄 Retake Quiz", use_container_width=True):
             st.session_state.quiz_submitted = False
             st.session_state.quiz_results = None
