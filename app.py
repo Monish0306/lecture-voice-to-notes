@@ -4,6 +4,7 @@ import tempfile
 import json
 import re
 import time
+import io
 import numpy as np
 import soundfile as sf
 import librosa
